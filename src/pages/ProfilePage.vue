@@ -1,48 +1,192 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, Camera, Mail, Phone, MapPin, Calendar, Edit3, Settings, Shield, Bell } from 'lucide-vue-next'
+import { ArrowLeft, Mail, Phone, MapPin, Edit3, Settings, Shield, Bell, Check, X } from 'lucide-vue-next'
+import { useUser } from '../composables/useUser'
+import { apiGet, apiPost } from '../services/api'
 
 const router = useRouter()
 
-// 用户信息（模拟数据）
-const userInfo = ref({
+type UserProfileResponse = {
+  name?: string
+  avatar?: string
+  tagJson?: string
+  favoritesCount?: number
+  ratingsCount?: number
+}
+
+const { userInfo, userInitial, refreshCurrentUser } = useUser()
+
+const profile = ref({
   avatar: '',
   name: '旅行者',
   email: 'traveler@example.com',
   phone: '138****8888',
   location: '江苏省南京市',
-  joinDate: '2024-01-15',
+  joinDate: '当前账号',
   bio: '热爱旅行，喜欢探索未知的风景和文化。',
 })
 
-const stats = ref([
-  { label: '旅行天数', value: 28 },
-  { label: '到访景点', value: 42 },
-  { label: '收藏数', value: 15 },
-  { label: '足迹城市', value: 8 },
+const isEditing = ref(false)
+
+const form = ref({
+  name: '',
+  email: '',
+  phone: '',
+  location: '',
+  bio: '',
+})
+
+const preferenceOptions = ref<string[]>([
+  '历史文化',
+  '自然风光',
+  '美食探索',
+  '城市地标',
+  '亲子休闲',
 ])
 
-const menuItems = [
-  { icon: Edit3, label: '编辑资料', description: '修改个人信息' },
-  { icon: Bell, label: '消息通知', description: '管理推送设置' },
-  { icon: Shield, label: '隐私设置', description: '账号安全管理' },
-  { icon: Settings, label: '系统设置', description: '偏好与语言' },
-]
+const preferences = ref<string[]>([])
+
+const avatarSrc = computed(() => profile.value.avatar || userInfo.value?.avatar || '')
+
+const stats = ref([
+  { label: '收藏景点', value: 0 },
+  { label: '评分记录', value: 0 },
+  { label: '偏好标签', value: 0 },
+  { label: '账号状态', value: 0 },
+])
+
+const loadLocalExtras = () => {
+  try {
+    const storedUserInfo = localStorage.getItem('userInfo')
+    if (storedUserInfo) {
+      const u = JSON.parse(storedUserInfo) as { email?: string; avatar?: string }
+      profile.value.email = u.email || profile.value.email
+      profile.value.avatar = u.avatar || profile.value.avatar
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const storedProfile = localStorage.getItem('profileExtra')
+    if (storedProfile) {
+      const extra = JSON.parse(storedProfile) as Partial<typeof profile.value>
+      profile.value = { ...profile.value, ...extra }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+const parseTagJson = (tagJson?: string) => {
+  if (!tagJson) return []
+  try {
+    const parsed = JSON.parse(tagJson)
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+const loadProfile = async () => {
+  const [me, profileData, tagOptions] = await Promise.all([
+    refreshCurrentUser().catch(() => userInfo.value),
+    apiGet<UserProfileResponse>('/api/user/profile'),
+    apiGet<string[]>('/api/user/tag-options'),
+  ])
+
+  if (Array.isArray(tagOptions) && tagOptions.length > 0) {
+    preferenceOptions.value = tagOptions
+  }
+
+  loadLocalExtras()
+
+  profile.value.avatar = profileData.avatar || me?.avatar || profile.value.avatar
+  profile.value.name = profileData.name || me?.name || profile.value.name
+  profile.value.email = me?.email || profile.value.email
+
+  preferences.value = parseTagJson(profileData.tagJson)
+
+  stats.value = [
+    { label: '收藏景点', value: profileData.favoritesCount || 0 },
+    { label: '评分记录', value: profileData.ratingsCount || 0 },
+    { label: '偏好标签', value: preferences.value.length },
+    { label: '账号状态', value: me?.status ?? 1 },
+  ]
+}
+
+const syncTagPreferences = async (nextTags: string[]) => {
+  await apiPost<string>('/api/user/tags', { tags: nextTags })
+  preferences.value = nextTags
+  stats.value[2].value = nextTags.length
+}
+
+const startEdit = () => {
+  isEditing.value = true
+  form.value = {
+    name: profile.value.name,
+    email: profile.value.email,
+    phone: profile.value.phone,
+    location: profile.value.location,
+    bio: profile.value.bio,
+  }
+}
+
+const cancelEdit = () => {
+  isEditing.value = false
+}
+
+const saveEdit = () => {
+  profile.value = { ...profile.value, ...form.value }
+
+  const nextUserInfo = {
+    ...(userInfo.value || {}),
+    name: profile.value.name || '旅行者',
+    email: profile.value.email || 'traveler@example.com',
+    avatar: avatarSrc.value || userInfo.value?.avatar || '',
+  }
+
+  localStorage.setItem('userInfo', JSON.stringify(nextUserInfo))
+  localStorage.setItem('profileExtra', JSON.stringify({
+    phone: profile.value.phone,
+    location: profile.value.location,
+    bio: profile.value.bio,
+    email: profile.value.email,
+  }))
+
+  if (userInfo.value) {
+    userInfo.value = { ...userInfo.value, ...nextUserInfo }
+  }
+
+  isEditing.value = false
+}
+
+const togglePreference = async (item: string) => {
+  const next = preferences.value.includes(item)
+    ? preferences.value.filter((current) => current !== item)
+    : [...preferences.value, item]
+  await syncTagPreferences(next)
+}
 
 const goBack = () => {
   router.back()
 }
+
+onMounted(() => {
+  loadProfile().catch(() => {
+    loadLocalExtras()
+  })
+})
 </script>
 
 <template>
   <div class="min-h-screen bg-gradient-to-b from-sky-50/80 to-white/90">
-    <!-- 顶部导航 -->
-    <header class="sticky top-0 z-10 px-4 py-4 md:px-6 backdrop-blur-xl bg-white/70 border-b border-sky-100/50">
-      <div class="max-w-2xl mx-auto flex items-center gap-3">
+    <header class="sticky top-0 z-10 border-b border-sky-100/50 bg-white/70 px-4 py-4 backdrop-blur-xl md:px-6">
+      <div class="mx-auto flex max-w-4xl items-center gap-3">
         <button
+          class="rounded-xl p-2 -ml-2 text-[var(--color-carbon-light)] transition-colors hover:bg-sky-100 hover:text-[var(--color-carbon)]"
           @click="goBack"
-          class="p-2 -ml-2 rounded-xl hover:bg-sky-100 text-[var(--color-carbon-light)] hover:text-[var(--color-carbon)] transition-colors"
         >
           <ArrowLeft class="w-5 h-5" />
         </button>
@@ -50,69 +194,130 @@ const goBack = () => {
       </div>
     </header>
 
-    <main class="max-w-2xl mx-auto px-4 py-6 md:px-6 md:py-8 space-y-6">
-      <!-- 用户信息卡片 -->
-      <div class="bg-white/60 backdrop-blur-sm rounded-3xl border border-sky-100/30 p-6 md:p-8">
-        <div class="flex flex-col md:flex-row items-center md:items-start gap-6">
-          <!-- 头像 -->
-          <div class="relative">
-            <div class="w-24 h-24 md:w-28 md:h-28 rounded-3xl bg-gradient-to-br from-[#00A3FF] to-sky-400 flex items-center justify-center text-white text-3xl md:text-4xl font-bold shadow-xl shadow-sky-200/50">
-              {{ userInfo.name.charAt(0) }}
+    <main class="mx-auto max-w-4xl px-4 py-6 md:px-6 md:py-8">
+      <div class="rounded-3xl bg-white/60 p-6 shadow-[0_12px_40px_rgba(147,177,207,0.22)] backdrop-blur-xl">
+        <div class="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+          <div class="flex items-center gap-4">
+            <div class="flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-br from-[#00A3FF] to-sky-400 text-2xl font-bold text-white shadow-lg shadow-sky-200/40">
+              <img v-if="avatarSrc" :src="avatarSrc" alt="avatar" class="h-full w-full rounded-3xl object-cover" />
+              <span v-else>{{ userInitial }}</span>
             </div>
-            <button class="absolute -bottom-1 -right-1 w-8 h-8 bg-white rounded-xl shadow-lg flex items-center justify-center text-[var(--color-carbon-light)] hover:text-[#00A3FF] transition-colors border border-sky-100/50">
-              <Camera class="w-4 h-4" />
-            </button>
+            <div>
+              <h2 class="text-2xl font-semibold text-[var(--color-carbon)]">{{ profile.name }}</h2>
+              <p class="mt-1 text-sm text-[var(--color-carbon-light)]">{{ profile.bio }}</p>
+            </div>
           </div>
 
-          <!-- 基本信息 -->
-          <div class="flex-1 text-center md:text-left">
-            <h2 class="text-xl md:text-2xl font-bold text-[var(--color-carbon)]">{{ userInfo.name }}</h2>
-            <p class="text-[var(--color-carbon-light)] mt-1 text-sm md:text-base">{{ userInfo.bio }}</p>
-            
-            <div class="flex flex-wrap justify-center md:justify-start gap-4 mt-4 text-sm text-[var(--color-carbon-light)]">
-              <div class="flex items-center gap-1.5">
-                <Mail class="w-4 h-4" />
-                <span>{{ userInfo.email }}</span>
-              </div>
-              <div class="flex items-center gap-1.5">
-                <MapPin class="w-4 h-4" />
-                <span>{{ userInfo.location }}</span>
-              </div>
-              <div class="flex items-center gap-1.5">
-                <Calendar class="w-4 h-4" />
-                <span>{{ userInfo.joinDate }} 加入</span>
-              </div>
-            </div>
-          </div>
+          <button
+            class="inline-flex items-center gap-2 rounded-2xl bg-white/70 px-4 py-3 text-sm font-medium text-[var(--color-carbon)] shadow-sm transition-colors hover:bg-white"
+            @click="startEdit"
+          >
+            <Edit3 class="w-4 h-4" />
+            编辑资料
+          </button>
         </div>
 
-        <!-- 统计数据 -->
-        <div class="grid grid-cols-4 gap-4 mt-8 pt-6 border-t border-sky-100/50">
-          <div v-for="stat in stats" :key="stat.label" class="text-center">
-            <p class="text-xl md:text-2xl font-bold text-[#00A3FF]">{{ stat.value }}</p>
-            <p class="text-xs md:text-sm text-[var(--color-carbon-light)] mt-1">{{ stat.label }}</p>
+        <div class="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <div
+            v-for="stat in stats"
+            :key="stat.label"
+            class="rounded-2xl bg-white/55 px-4 py-4 text-center backdrop-blur"
+          >
+            <p class="text-2xl font-bold text-[#00A3FF]">{{ stat.value }}</p>
+            <p class="mt-1 text-sm text-[var(--color-carbon-light)]">{{ stat.label }}</p>
           </div>
         </div>
       </div>
 
-      <!-- 功能菜单 -->
-      <div class="bg-white/60 backdrop-blur-sm rounded-3xl border border-sky-100/30 overflow-hidden">
-        <div
-          v-for="(item, index) in menuItems"
-          :key="item.label"
-          :class="[
-            'flex items-center gap-4 px-6 py-4 hover:bg-sky-50/50 transition-colors cursor-pointer',
-            index !== menuItems.length - 1 ? 'border-b border-sky-100/30' : ''
-          ]"
-        >
-          <div class="w-10 h-10 rounded-xl bg-sky-50 flex items-center justify-center">
-            <component :is="item.icon" class="w-5 h-5 text-[#00A3FF]" />
+      <div class="mt-6 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+        <div class="rounded-3xl bg-white/60 p-6 shadow-[0_10px_34px_rgba(147,177,207,0.18)] backdrop-blur-xl">
+          <div class="mb-5 flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-[var(--color-carbon)]">基础信息</h3>
+            <Settings class="w-5 h-5 text-[var(--color-carbon-light)]" />
           </div>
-          <div class="flex-1">
-            <p class="font-medium text-[var(--color-carbon)]">{{ item.label }}</p>
-            <p class="text-sm text-[var(--color-carbon-light)]">{{ item.description }}</p>
+
+          <div class="space-y-4">
+            <div class="flex items-center gap-3">
+              <Mail class="w-4 h-4 text-[#00A3FF]" />
+              <div>
+                <p class="text-xs text-[var(--color-carbon-light)]">邮箱</p>
+                <p class="text-sm text-[var(--color-carbon)]">{{ profile.email }}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <Phone class="w-4 h-4 text-[#00A3FF]" />
+              <div>
+                <p class="text-xs text-[var(--color-carbon-light)]">电话</p>
+                <p class="text-sm text-[var(--color-carbon)]">{{ profile.phone }}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <MapPin class="w-4 h-4 text-[#00A3FF]" />
+              <div>
+                <p class="text-xs text-[var(--color-carbon-light)]">所在地</p>
+                <p class="text-sm text-[var(--color-carbon)]">{{ profile.location }}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <Shield class="w-4 h-4 text-[#00A3FF]" />
+              <div>
+                <p class="text-xs text-[var(--color-carbon-light)]">账号说明</p>
+                <p class="text-sm text-[var(--color-carbon)]">{{ profile.joinDate }}</p>
+              </div>
+            </div>
           </div>
-          <ArrowLeft class="w-5 h-5 text-[var(--color-carbon-light)] rotate-180" />
+        </div>
+
+        <div class="rounded-3xl bg-white/60 p-6 shadow-[0_10px_34px_rgba(147,177,207,0.18)] backdrop-blur-xl">
+          <div class="mb-5 flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-[var(--color-carbon)]">偏好标签</h3>
+            <Bell class="w-5 h-5 text-[var(--color-carbon-light)]" />
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <button
+              v-for="item in preferenceOptions"
+              :key="item"
+              :class="[
+                'rounded-full px-4 py-2 text-sm font-medium transition-all',
+                preferences.includes(item)
+                  ? 'bg-[#00A3FF] text-white shadow-sm shadow-sky-200'
+                  : 'bg-white/70 text-[var(--color-carbon)] hover:bg-white',
+              ]"
+              @click="togglePreference(item)"
+            >
+              {{ item }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="isEditing" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/20 px-4">
+        <div class="w-full max-w-lg rounded-3xl border border-white/50 bg-white/90 p-6 shadow-2xl backdrop-blur-xl">
+          <div class="mb-5 flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-[var(--color-carbon)]">编辑资料</h3>
+            <button class="rounded-xl p-2 text-[var(--color-carbon-light)] hover:bg-slate-100" @click="cancelEdit">
+              <X class="w-4 h-4" />
+            </button>
+          </div>
+
+          <div class="space-y-4">
+            <input v-model="form.name" type="text" placeholder="姓名" class="w-full rounded-2xl bg-sky-50/70 px-4 py-3 outline-none focus:ring-2 focus:ring-sky-300" />
+            <input v-model="form.email" type="email" placeholder="traveler@example.com" class="w-full rounded-2xl bg-sky-50/70 px-4 py-3 outline-none focus:ring-2 focus:ring-sky-300" />
+            <input v-model="form.phone" type="text" placeholder="手机号" class="w-full rounded-2xl bg-sky-50/70 px-4 py-3 outline-none focus:ring-2 focus:ring-sky-300" />
+            <input v-model="form.location" type="text" placeholder="所在地" class="w-full rounded-2xl bg-sky-50/70 px-4 py-3 outline-none focus:ring-2 focus:ring-sky-300" />
+            <textarea v-model="form.bio" rows="4" placeholder="个人简介" class="w-full rounded-2xl bg-sky-50/70 px-4 py-3 outline-none focus:ring-2 focus:ring-sky-300"></textarea>
+          </div>
+
+          <div class="mt-6 flex justify-end gap-3">
+            <button class="rounded-2xl bg-white px-4 py-3 text-sm font-medium text-[var(--color-carbon)] hover:bg-slate-50" @click="cancelEdit">
+              取消
+            </button>
+            <button class="inline-flex items-center gap-2 rounded-2xl bg-[#00A3FF] px-4 py-3 text-sm font-medium text-white hover:bg-sky-500" @click="saveEdit">
+              <Check class="w-4 h-4" />
+              保存
+            </button>
+          </div>
         </div>
       </div>
     </main>

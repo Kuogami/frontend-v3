@@ -1,248 +1,549 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import { 
-  MapPin, 
-  Navigation, 
-  MousePointer2, 
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import AMapLoader from '@amap/amap-jsapi-loader'
+import {
+  MapPin,
+  Navigation,
+  MousePointer2,
   LocateFixed,
   Clock,
   ChevronUp,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  X
+  X,
 } from 'lucide-vue-next'
+import { AMAP_KEY, apiGet } from '../services/api'
 
-// 起点终点
+type LngLatTuple = [number, number]
+
+type PickedLocation = {
+  address: string
+  lnglat: LngLatTuple
+}
+
+type RouteSpot = {
+  id: number
+  name: string
+  duration: string
+  type: string
+  lnglat?: LngLatTuple
+  openTime?: string
+}
+
+type BackendRoutePlan = {
+  distance?: number
+  duration?: number
+  points?: Array<LngLatTuple | string | { lng?: number | string; lat?: number | string } | { longitude?: number | string; latitude?: number | string }>
+  steps?: string[]
+  summary?: string
+}
+
+type BackendAttraction = {
+  id?: number
+  name?: string
+  category?: string
+  description?: string
+  address?: string
+  latitude?: number | string | null
+  longitude?: number | string | null
+  city?: string
+  averageRating?: number | null
+  openTime?: string
+  suggestedDuration?: string
+  suggestedVisitDuration?: string
+}
+
+type BackendRecommendationReason = {
+  attractionName?: string
+  reason?: string
+  highlights?: string[]
+}
+
+type BackendRouteResponse = {
+  normalRoute?: BackendRoutePlan | null
+  personalRoute?: BackendRoutePlan | null
+  viaAttractions?: BackendAttraction[]
+  reasons?: BackendRecommendationReason[]
+  historyId?: number
+}
+
+const route = useRoute()
+
 const startPoint = ref('')
 const endPoint = ref('')
-
-// 方案模式
 const planMode = ref<'normal' | 'personalized' | 'compare'>('personalized')
-
-// 移动端抽屉状态
 const drawerState = ref<'collapsed' | 'half' | 'full'>('half')
-
-// 导航状态
 const isNavigating = ref(false)
-const routeProgress = ref(0)
-
-// 地图选点模式
 const pickingMode = ref<'none' | 'start' | 'end'>('none')
-
-// 桌面端面板折叠状态
 const isPanelCollapsed = ref(false)
 
-// 涟漪效果状态
-const rippleEffect = ref<{ x: number; y: number; show: boolean }>({ x: 0, y: 0, show: false })
+const startLocation = ref<PickedLocation | null>(null)
+const endLocation = ref<PickedLocation | null>(null)
 
-// 地图中心坐标（模拟）
-const mapCenter = ref({ x: 50, y: 50 })
+const map = shallowRef<any>(null)
+let AMap: any | null = null
+let geocoder: any | null = null
+const startMarker = shallowRef<any>(null)
+const endMarker = shallowRef<any>(null)
+const attractionMarkers = shallowRef<any[]>([])
+const normalPolyline = shallowRef<any>(null)
+const personalPolyline = shallowRef<any>(null)
 
-// 路线绘制是否完成
-const routeDrawn = ref(false)
+const timelineSpots = ref<RouteSpot[]>([])
+const normalRoutes = ref<Array<{ id: number; name: string; time: string; distance: string; via: string }>>([])
+const compareData = ref<Array<{ label: string; route1: string; route2: string }>>([])
 
-// 地图标记点位置
-const markers = computed(() => {
-  if (planMode.value === 'normal') {
-    return {
-      start: { x: 25, y: 20 },
-      spots: [
-        { x: 40, y: 35 },
-        { x: 60, y: 45 },
-        { x: 75, y: 38 }
-      ],
-      end: { x: 72, y: 65 }
-    }
-  } else {
-    return {
-      start: { x: 30, y: 22 },
-      spots: [
-        { x: 45, y: 37 },
-        { x: 55, y: 52 },
-        { x: 70, y: 42 }
-      ],
-      end: { x: 68, y: 68 }
-    }
-  }
-})
-
-// SVG 路径（根据方案动态变化）
-const routePath = computed(() => {
-  const m = markers.value
-  if (planMode.value === 'normal') {
-    return `M ${m.start.x}% ${m.start.y}% 
-            Q ${(m.start.x + m.spots[0].x) / 2}% ${m.start.y + 5}%, ${m.spots[0].x}% ${m.spots[0].y}% 
-            Q ${(m.spots[0].x + m.spots[1].x) / 2}% ${m.spots[0].y + 5}%, ${m.spots[1].x}% ${m.spots[1].y}% 
-            Q ${(m.spots[1].x + m.spots[2].x) / 2}% ${m.spots[1].y - 3}%, ${m.spots[2].x}% ${m.spots[2].y}% 
-            Q ${(m.spots[2].x + m.end.x) / 2}% ${m.spots[2].y + 10}%, ${m.end.x}% ${m.end.y}%`
-  } else {
-    return `M ${m.start.x}% ${m.start.y}% 
-            C ${m.start.x + 10}% ${m.start.y + 15}%, ${m.spots[0].x - 5}% ${m.spots[0].y - 10}%, ${m.spots[0].x}% ${m.spots[0].y}% 
-            S ${m.spots[1].x - 5}% ${m.spots[1].y - 5}%, ${m.spots[1].x}% ${m.spots[1].y}% 
-            S ${m.spots[2].x - 5}% ${m.spots[2].y + 5}%, ${m.spots[2].x}% ${m.spots[2].y}% 
-            S ${m.end.x - 5}% ${m.end.y - 10}%, ${m.end.x}% ${m.end.y}%`
-  }
-})
-
-// 个性化路线时间轴数据
-const timelineSpots = ref([
-  { id: 1, name: '故宫博物院', duration: '3小时', type: 'attraction' },
-  { id: 2, name: '景山公园', duration: '1.5小时', type: 'attraction' },
-  { id: 3, name: '北海公园', duration: '2小时', type: 'attraction' },
-  { id: 4, name: '什刹海', duration: '2小时', type: 'attraction' },
-])
-
-// 普通路线数据
-const normalRoutes = ref([
-  { id: 1, name: '推荐路线', time: '8小时', distance: '15公里', via: '故宫 → 景山 → 北海' },
-  { id: 2, name: '快速路线', time: '6小时', distance: '12公里', via: '故宫 → 北海 → 什刹海' },
-])
-
-// 对比数据
-const compareData = ref([
-  { label: '总时间', route1: '8小时', route2: '6小时' },
-  { label: '总距离', route1: '15公里', route2: '12公里' },
-  { label: '景点数', route1: '4个', route2: '3个' },
-  { label: '步行距离', route1: '5公里', route2: '3公里' },
-])
-
-// 抽屉高度类
 const drawerHeightClass = computed(() => {
   if (isNavigating.value) {
     return 'h-[70vh]'
   }
   switch (drawerState.value) {
-    case 'collapsed': return 'h-[120px]'
-    case 'half': return 'h-[50vh]'
-    case 'full': return 'h-[85vh]'
-    default: return 'h-[50vh]'
+    case 'collapsed':
+      return 'h-[120px]'
+    case 'half':
+      return 'h-[50vh]'
+    case 'full':
+      return 'h-[85vh]'
+    default:
+      return 'h-[50vh]'
   }
 })
 
-// 输入完成后自动移动地图
-watch(startPoint, (val) => {
-  if (val.length > 2) {
-    animateMapTo(markers.value.start.x, markers.value.start.y)
-  }
-})
-
-watch(endPoint, (val) => {
-  if (val.length > 2) {
-    animateMapTo(markers.value.end.x, markers.value.end.y)
-  }
-})
-
-// 平滑移动地图
-const animateMapTo = (targetX: number, targetY: number) => {
-  const startX = mapCenter.value.x
-  const startY = mapCenter.value.y
-  const duration = 600
-  const startTime = performance.now()
-  
-  const animate = (currentTime: number) => {
-    const elapsed = currentTime - startTime
-    const progress = Math.min(elapsed / duration, 1)
-    const eased = 1 - Math.pow(1 - progress, 3)
-    
-    mapCenter.value.x = startX + (targetX - startX) * eased
-    mapCenter.value.y = startY + (targetY - startY) * eased
-    
-    if (progress < 1) {
-      requestAnimationFrame(animate)
-    }
-  }
-  
-  requestAnimationFrame(animate)
+const formatDurationLabel = (seconds?: number) => {
+  if (!seconds || seconds <= 0) return '待定'
+  const minutes = Math.max(1, Math.round(seconds / 60))
+  const hours = Math.floor(minutes / 60)
+  const remainMinutes = minutes % 60
+  if (hours <= 0) return `${minutes}分钟`
+  if (remainMinutes === 0) return `${hours}小时`
+  return `${hours}小时${remainMinutes}分钟`
 }
 
-// 开始选点模式
+const formatDistanceLabel = (meters?: number) => {
+  if (!meters || meters <= 0) return '待定'
+  return `${(meters / 1000).toFixed(1)}公里`
+}
+
+const parseLngLat = (value: unknown): LngLatTuple | null => {
+  if (Array.isArray(value) && value.length >= 2) {
+    const lng = Number(value[0])
+    const lat = Number(value[1])
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      return [lng, lat]
+    }
+  }
+
+  if (typeof value === 'string') {
+    const [lngText, latText] = value.split(',')
+    const lng = Number(lngText)
+    const lat = Number(latText)
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      return [lng, lat]
+    }
+  }
+
+  if (value && typeof value === 'object') {
+    const point = value as { lng?: number | string; lat?: number | string; longitude?: number | string; latitude?: number | string }
+    const lng = Number(point.lng ?? point.longitude)
+    const lat = Number(point.lat ?? point.latitude)
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      return [lng, lat]
+    }
+  }
+
+  return null
+}
+
+const normalizePoints = (points?: BackendRoutePlan['points']) => {
+  return (points || [])
+    .map(parseLngLat)
+    .filter((point): point is LngLatTuple => Array.isArray(point))
+}
+
+const createEndpointMarkerContent = (label: string, color: string, icon: string) => `
+  <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:9999px;background:${color};box-shadow:0 10px 24px rgba(15,23,42,0.18);border:2px solid rgba(255,255,255,0.95);color:#fff;font-size:13px;font-weight:700;white-space:nowrap;">
+    <span style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:9999px;background:rgba(255,255,255,0.2);font-size:14px;line-height:1;">${icon}</span>
+    <span>${label}</span>
+  </div>
+`
+
+const createIndexedMarkerContent = (index: number, name: string) => `
+  <div style="display:flex;flex-direction:column;align-items:center;transform:translateY(-6px);">
+    <div style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:9999px;background:linear-gradient(135deg,#ffffff 0%,#eff6ff 100%);border:2px solid #0ea5e9;color:#0369a1;font-size:14px;font-weight:800;box-shadow:0 10px 20px rgba(14,165,233,0.24);">${index}</div>
+    <div style="margin-top:6px;padding:4px 8px;border-radius:9999px;background:rgba(255,255,255,0.95);border:1px solid rgba(14,165,233,0.16);box-shadow:0 8px 18px rgba(148,163,184,0.18);color:#0f172a;font-size:12px;font-weight:600;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;">${name}</div>
+  </div>
+`
+
+const getVisibleOverlays = () => {
+  const overlays = [startMarker.value, endMarker.value]
+
+  if (planMode.value === 'normal' || planMode.value === 'compare') {
+    overlays.push(normalPolyline.value)
+  }
+  if (planMode.value === 'personalized' || planMode.value === 'compare') {
+    overlays.push(personalPolyline.value, ...attractionMarkers.value)
+  }
+
+  return overlays.filter(Boolean)
+}
+
+const fitMapToVisibleMarkers = () => {
+  if (!map.value) return
+  const overlays = getVisibleOverlays()
+  if (overlays.length > 0) {
+    map.value.setFitView(overlays, false, [80, 120, 80, 120])
+  }
+}
+
+const updateMapVisibility = () => {
+  if (!map.value) return
+
+  if (normalPolyline.value) {
+    if (planMode.value === 'normal' || planMode.value === 'compare') {
+      normalPolyline.value.show?.()
+    } else {
+      normalPolyline.value.hide?.()
+    }
+  }
+
+  if (personalPolyline.value) {
+    if (planMode.value === 'personalized' || planMode.value === 'compare') {
+      personalPolyline.value.show?.()
+    } else {
+      personalPolyline.value.hide?.()
+    }
+  }
+
+  attractionMarkers.value.forEach((marker) => {
+    if (planMode.value === 'personalized' || planMode.value === 'compare') {
+      marker.show?.()
+    } else {
+      marker.hide?.()
+    }
+  })
+
+  fitMapToVisibleMarkers()
+}
+
+const setEndpointMarker = (type: 'start' | 'end', location: PickedLocation) => {
+  if (!map.value || !AMap) return
+
+  const markerRef = type === 'start' ? startMarker : endMarker
+  const content = type === 'start'
+    ? createEndpointMarkerContent('起点', '#0ea5e9', 'S')
+    : createEndpointMarkerContent('终点', '#10b981', 'E')
+
+  if (!markerRef.value) {
+    markerRef.value = new AMap.Marker({
+      position: location.lnglat,
+      anchor: 'bottom-center',
+      offset: new AMap.Pixel(0, 6),
+      content,
+    })
+    map.value.add(markerRef.value)
+  } else {
+    markerRef.value.setPosition(location.lnglat)
+    markerRef.value.setContent(content)
+  }
+}
+
+const clearAttractionMarkers = () => {
+  if (!map.value || attractionMarkers.value.length === 0) return
+  map.value.remove(attractionMarkers.value)
+  attractionMarkers.value = []
+}
+
+const clearRoutePolylines = () => {
+  if (!map.value) return
+  normalPolyline.value?.setMap?.(null)
+  personalPolyline.value?.setMap?.(null)
+  normalPolyline.value = null
+  personalPolyline.value = null
+}
+
+const renderAttractionMarkers = (spots: RouteSpot[]) => {
+  if (!map.value || !AMap) return
+
+  clearAttractionMarkers()
+
+  const nextMarkers = spots
+    .filter((spot): spot is RouteSpot & { lnglat: LngLatTuple } => Array.isArray(spot.lnglat) && spot.lnglat.length === 2)
+    .map((spot, index) => new AMap.Marker({
+      position: spot.lnglat,
+      anchor: 'bottom-center',
+      offset: new AMap.Pixel(0, 6),
+      content: createIndexedMarkerContent(index + 1, spot.name),
+    }))
+
+  if (nextMarkers.length > 0) {
+    attractionMarkers.value = nextMarkers
+    map.value.add(nextMarkers)
+  }
+}
+
+const renderRoutePolylines = (normalPoints: LngLatTuple[], personalPoints: LngLatTuple[]) => {
+  if (!map.value || !AMap) return
+
+  clearRoutePolylines()
+
+  if (normalPoints.length > 1) {
+    normalPolyline.value = new AMap.Polyline({
+      strokeColor: '#38bdf8',
+      strokeWeight: 6,
+      strokeOpacity: 0.88,
+      zIndex: 40,
+    })
+    normalPolyline.value.setPath(normalPoints)
+    normalPolyline.value.setMap(map.value)
+  }
+
+  if (personalPoints.length > 1) {
+    personalPolyline.value = new AMap.Polyline({
+      strokeColor: '#10b981',
+      strokeWeight: 7,
+      strokeOpacity: 0.92,
+      zIndex: 50,
+    })
+    personalPolyline.value.setPath(personalPoints)
+    personalPolyline.value.setMap(map.value)
+  }
+}
+
+const resolveAddress = (lnglat: LngLatTuple) => new Promise<string>((resolve) => {
+  if (!geocoder) {
+    resolve(`已选位置 (${lnglat[0].toFixed(6)}, ${lnglat[1].toFixed(6)})`)
+    return
+  }
+
+  geocoder.getAddress(lnglat, (status: string, result: any) => {
+    if (status === 'complete' && result?.regeocode?.formattedAddress) {
+      resolve(result.regeocode.formattedAddress)
+      return
+    }
+    resolve(`已选位置 (${lnglat[0].toFixed(6)}, ${lnglat[1].toFixed(6)})`)
+  })
+})
+
+const applyPickedLocation = async (type: 'start' | 'end', lnglat: LngLatTuple) => {
+  const address = await resolveAddress(lnglat)
+  const text = `${address} (${lnglat[0].toFixed(6)}, ${lnglat[1].toFixed(6)})`
+  const location = { address, lnglat }
+
+  if (type === 'start') {
+    startPoint.value = text
+    startLocation.value = location
+  } else {
+    endPoint.value = text
+    endLocation.value = location
+  }
+
+  setEndpointMarker(type, location)
+  fitMapToVisibleMarkers()
+}
+
+const buildTimelineSpots = (attractions: BackendAttraction[], reasons: BackendRecommendationReason[]) => {
+  const highlightMap = new Map(
+    reasons
+      .filter((item) => item.attractionName)
+      .map((item) => [item.attractionName as string, item])
+  )
+
+  return attractions.map((item, index) => {
+    const lnglat = parseLngLat([item.longitude, item.latitude]) || undefined
+    const reason = highlightMap.get(item.name || '')
+    return {
+      id: item.id || index + 1,
+      name: item.name || `推荐景点${index + 1}`,
+      duration: item.suggestedDuration || item.suggestedVisitDuration || reason?.reason || '待定',
+      type: item.category || 'attraction',
+      lnglat,
+      openTime: item.openTime || '待定',
+    }
+  })
+}
+
+const applyRouteResponse = async (payload: BackendRouteResponse) => {
+  const normalPlan = payload.normalRoute || {}
+  const personalPlan = payload.personalRoute || {}
+  const attractions = (payload.viaAttractions || []).map((item) => ({
+    ...item,
+    openTime: item.openTime || '待定',
+    suggestedDuration: item.suggestedDuration || item.suggestedVisitDuration || '待定',
+  }))
+  const reasons = payload.reasons || []
+
+  timelineSpots.value = buildTimelineSpots(attractions, reasons)
+
+  const normalDistance = formatDistanceLabel(normalPlan.distance)
+  const normalDuration = formatDurationLabel(normalPlan.duration)
+  const viaSummary = timelineSpots.value.length > 0
+    ? timelineSpots.value.map((item) => item.name).join(' → ')
+    : (normalPlan.summary || '直接前往终点')
+
+  normalRoutes.value = [{
+    id: 1,
+    name: '推荐路线',
+    time: normalDuration,
+    distance: normalDistance,
+    via: viaSummary,
+  }]
+
+  compareData.value = [
+    {
+      label: '总时间',
+      route1: formatDurationLabel(normalPlan.duration),
+      route2: formatDurationLabel(personalPlan.duration),
+    },
+    {
+      label: '总距离',
+      route1: formatDistanceLabel(normalPlan.distance),
+      route2: formatDistanceLabel(personalPlan.distance),
+    },
+    {
+      label: '景点数',
+      route1: '0个',
+      route2: `${timelineSpots.value.length}个`,
+    },
+    {
+      label: '推荐亮点',
+      route1: '直达终点',
+      route2: reasons[0]?.reason || '个性化推荐',
+    },
+  ]
+
+  const normalPoints = normalizePoints(normalPlan.points)
+  const personalPoints = normalizePoints(personalPlan.points)
+
+  console.log('解析后的路径:', {
+    normalPath: normalPoints,
+    personalPath: personalPoints,
+  })
+
+  renderRoutePolylines(normalPoints, personalPoints)
+  await nextTick()
+  updateMapVisibility()
+  fitMapToVisibleMarkers()
+}
+
+const initAMap = async () => {
+  if (map.value) return
+
+  AMap = await AMapLoader.load({
+    key: AMAP_KEY,
+    version: '2.0',
+    plugins: ['AMap.Geocoder'],
+  })
+
+  geocoder = new AMap.Geocoder()
+
+  map.value = new AMap.Map('container', {
+    mapStyle: 'amap://styles/normal',
+    center: [118.796623, 32.059352],
+    zoom: 11,
+    viewMode: '2D',
+  })
+
+  map.value.on('click', async (e: any) => {
+    if (pickingMode.value === 'none') return
+
+    const lng = Number(e?.lnglat?.getLng?.() ?? e?.lnglat?.lng)
+    const lat = Number(e?.lnglat?.getLat?.() ?? e?.lnglat?.lat)
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
+
+    const currentPickingMode = pickingMode.value
+    const pos: LngLatTuple = [lng, lat]
+
+    await applyPickedLocation(currentPickingMode, pos)
+
+    pickingMode.value = 'none'
+    setTimeout(() => {
+      isPanelCollapsed.value = false
+    }, 200)
+  })
+}
+
 const startPicking = (type: 'start' | 'end') => {
   pickingMode.value = type
-  // 自动折叠面板
   isPanelCollapsed.value = true
 }
 
-// 切换面板折叠状态
 const togglePanelCollapse = () => {
   isPanelCollapsed.value = !isPanelCollapsed.value
 }
 
-// 展开面板（用于把手点击）
 const expandPanel = () => {
   isPanelCollapsed.value = false
 }
 
-// 地图点击直接选点（点击即确认，无弹窗）
-const handleMapClick = (event: MouseEvent) => {
-  if (pickingMode.value === 'none') return
-  
-  const target = event.currentTarget as HTMLElement
-  const rect = target.getBoundingClientRect()
-  const x = ((event.clientX - rect.left) / rect.width) * 100
-  const y = ((event.clientY - rect.top) / rect.height) * 100
-  
-  // 显示涟漪效果
-  rippleEffect.value = { x, y, show: true }
-  setTimeout(() => {
-    rippleEffect.value.show = false
-  }, 600)
-  
-  // 立即回填坐标到输入框
-  if (pickingMode.value === 'start') {
-    startPoint.value = `选定位置 (${x.toFixed(1)}, ${y.toFixed(1)})`
-  } else if (pickingMode.value === 'end') {
-    endPoint.value = `选定位置 (${x.toFixed(1)}, ${y.toFixed(1)})`
-  }
-  
-  // 移动地图中心
-  animateMapTo(x, y)
-  
-  // 退出选点模式并自动展开面板（带动画延迟）
-  pickingMode.value = 'none'
-  setTimeout(() => {
-    isPanelCollapsed.value = false
-  }, 200)
+const useCurrentLocation = async (type: 'start' | 'end') => {
+  const defaultLocation: LngLatTuple = [118.7966, 32.0593]
+  await applyPickedLocation(type, defaultLocation)
+  map.value?.setCenter?.(defaultLocation)
 }
 
-// 使用当前位置
-const useCurrentLocation = (type: 'start' | 'end') => {
-  if (type === 'start') {
-    startPoint.value = '当前位置'
-  } else {
-    endPoint.value = '当前位置'
-  }
-  animateMapTo(50, 50)
-}
-
-// 开始导航
-const startNavigation = () => {
-  isNavigating.value = true
-  routeProgress.value = 0
-  routeDrawn.value = false
-  
-  // 移动端自动展开抽屉
-  if (window.innerWidth < 768) {
-    drawerState.value = 'full'
-  }
-  
-  // 动画绘制路线
-  const animateRoute = () => {
-    if (routeProgress.value < 100) {
-      routeProgress.value += 1
-      setTimeout(animateRoute, 30)
-    } else {
-      routeDrawn.value = true
+const serializeLocation = (location: PickedLocation | null, fallbackText: string) => {
+  if (location) {
+    return {
+      coord: `${location.lnglat[0]},${location.lnglat[1]}`,
+      name: location.address,
     }
   }
-  animateRoute()
+  return {
+    coord: fallbackText.trim(),
+    name: fallbackText.trim(),
+  }
 }
 
-// 停止导航
+const startNavigation = async () => {
+  const originText = startPoint.value.trim()
+  const destinationText = endPoint.value.trim()
+  if (!originText || !destinationText) {
+    window.alert('请先选择起点和终点')
+    return
+  }
+
+  isNavigating.value = true
+
+  try {
+    const origin = serializeLocation(startLocation.value, originText)
+    const destination = serializeLocation(endLocation.value, destinationText)
+
+    const response = await apiGet<BackendRouteResponse>('/api/recommend-route', {
+      origin: origin.coord,
+      originName: origin.name,
+      destination: destination.coord,
+      destinationName: destination.name,
+    })
+
+    console.log('后端原始数据:', response)
+    await applyRouteResponse(response)
+    isNavigating.value = true
+
+    if (window.innerWidth < 768) {
+      drawerState.value = 'full'
+    }
+  } catch {
+    isNavigating.value = false
+  }
+}
+
+const resetNavigationResult = () => {
+  clearRoutePolylines()
+  clearAttractionMarkers()
+  timelineSpots.value = []
+  normalRoutes.value = []
+  compareData.value = []
+}
+
 const stopNavigation = () => {
+  resetNavigationResult()
   isNavigating.value = false
-  routeProgress.value = 0
-  routeDrawn.value = false
+  if (window.innerWidth < 768) {
+    drawerState.value = 'half'
+  }
+  fitMapToVisibleMarkers()
 }
 
 const toggleDrawer = () => {
@@ -262,177 +563,61 @@ const collapseDrawer = () => {
 const expandDrawer = () => {
   drawerState.value = 'full'
 }
+
+watch(
+  () => route.query.mode,
+  (mode) => {
+    const m = typeof mode === 'string' ? mode : ''
+    if (m === 'normal' || m === 'personalized' || m === 'compare') {
+      planMode.value = m
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  timelineSpots,
+  (spots) => {
+    renderAttractionMarkers(spots)
+    updateMapVisibility()
+  },
+  { deep: true }
+)
+
+watch(planMode, () => {
+  updateMapVisibility()
+})
+
+onMounted(() => {
+  initAMap()
+})
+
+onBeforeUnmount(() => {
+  try {
+    clearRoutePolylines()
+    clearAttractionMarkers()
+    map.value?.destroy?.()
+  } finally {
+    map.value = null
+    AMap = null
+    geocoder = null
+    startMarker.value = null
+    endMarker.value = null
+    normalPolyline.value = null
+    personalPolyline.value = null
+    attractionMarkers.value = []
+  }
+})
 </script>
 
 <template>
-  <div class="relative w-full h-[calc(100vh-80px)] overflow-hidden">
+  <div class="relative isolate w-full min-h-[calc(100vh-80px)] overflow-hidden">
     <!-- 全屏地图背景层（可点击选点） -->
     <div 
-      class="absolute inset-0 bg-gradient-to-br from-sky-100 via-sky-50 to-blue-100 transition-transform duration-500"
+      id="container"
+      class="fixed inset-0 w-full h-full -z-10 transition-transform duration-500"
       :class="{ 'cursor-crosshair': pickingMode !== 'none' }"
-      :style="{ transform: `translate(${50 - mapCenter.x}%, ${50 - mapCenter.y}%) scale(1.2)` }"
-      @click="handleMapClick"
     >
-      <!-- 模拟地图网格 -->
-      <div class="absolute inset-0 opacity-30">
-        <svg class="w-full h-full" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-              <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#93B1CF" stroke-width="0.5"/>
-            </pattern>
-          </defs>
-          <rect width="100%" height="100%" fill="url(#grid)" />
-        </svg>
-      </div>
-      
-      <!-- 涟漪效果 -->
-      <div 
-        v-if="rippleEffect.show"
-        class="absolute w-16 h-16 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
-        :style="{ left: rippleEffect.x + '%', top: rippleEffect.y + '%' }"
-      >
-        <div class="w-full h-full rounded-full bg-sky-400/40 animate-ripple"></div>
-        <div class="absolute inset-0 rounded-full bg-sky-400/30 animate-ripple-delay"></div>
-      </div>
-      
-      <!-- 地图标记点 - 起点 -->
-      <div 
-        class="absolute flex flex-col items-center transition-all duration-500"
-        :style="{ left: markers.start.x + '%', top: markers.start.y + '%' }"
-      >
-        <div class="w-10 h-10 rounded-full bg-sky-500 flex items-center justify-center text-white shadow-lg shadow-sky-200">
-          <MapPin class="w-5 h-5" />
-        </div>
-        <span class="mt-1 px-2 py-0.5 bg-white/90 rounded-full text-xs text-carbon shadow-sm">起点</span>
-      </div>
-      
-      <!-- 途经景点 -->
-      <div 
-        v-for="(spot, index) in markers.spots"
-        :key="index"
-        class="absolute flex flex-col items-center transition-all duration-500"
-        :style="{ left: spot.x + '%', top: spot.y + '%' }"
-      >
-        <div class="w-8 h-8 rounded-full bg-sky-400 flex items-center justify-center text-white text-sm font-medium shadow-lg">
-          {{ index + 1 }}
-        </div>
-      </div>
-      
-      <!-- 终点 -->
-      <div 
-        class="absolute flex flex-col items-center transition-all duration-500"
-        :style="{ left: markers.end.x + '%', top: markers.end.y + '%' }"
-      >
-        <div class="w-10 h-10 rounded-full bg-emerald-500 flex items-center justify-center text-white shadow-lg shadow-emerald-200">
-          <Navigation class="w-5 h-5" />
-        </div>
-        <span class="mt-1 px-2 py-0.5 bg-white/90 rounded-full text-xs text-carbon shadow-sm">终点</span>
-      </div>
-
-      <!-- 导航路线 SVG -->
-      <svg class="absolute inset-0 w-full h-full pointer-events-none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <!-- 流光渐变 - 增强版 -->
-          <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="transparent">
-              <animate attributeName="offset" values="0;1" dur="2s" repeatCount="indefinite" />
-            </stop>
-            <stop offset="20%" stop-color="rgba(255,255,255,0.9)">
-              <animate attributeName="offset" values="0.2;1.2" dur="2s" repeatCount="indefinite" />
-            </stop>
-            <stop offset="30%" stop-color="rgba(255,255,255,0.9)">
-              <animate attributeName="offset" values="0.3;1.3" dur="2s" repeatCount="indefinite" />
-            </stop>
-            <stop offset="50%" stop-color="transparent">
-              <animate attributeName="offset" values="0.5;1.5" dur="2s" repeatCount="indefinite" />
-            </stop>
-          </linearGradient>
-          
-          <!-- 发光滤镜 -->
-          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-            <feMerge>
-              <feMergeNode in="coloredBlur"/>
-              <feMergeNode in="SourceGraphic"/>
-            </feMerge>
-          </filter>
-          
-          <!-- 路线裁剪蒙版 -->
-          <mask id="routeMask">
-            <path 
-              :d="routePath"
-              fill="none" 
-              stroke="white" 
-              stroke-width="8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              :stroke-dasharray="isNavigating ? `${routeProgress * 10} 10000` : 'none'"
-            />
-          </mask>
-        </defs>
-        
-        <!-- 底层路线阴影 -->
-        <path 
-          v-if="isNavigating"
-          :d="routePath"
-          fill="none" 
-          stroke="rgba(14, 165, 233, 0.3)" 
-          stroke-width="16"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          :stroke-dasharray="`${routeProgress * 10} 10000`"
-          class="transition-all duration-100"
-          filter="url(#glow)"
-        />
-        
-        <!-- 主路线（天蓝色） -->
-        <path 
-          v-if="isNavigating"
-          :d="routePath"
-          fill="none" 
-          stroke="#00A3FF" 
-          stroke-width="6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          :stroke-dasharray="`${routeProgress * 10} 10000`"
-          class="transition-all duration-100"
-        />
-        
-        <!-- 流光效果层 -->
-        <g v-if="isNavigating && routeDrawn" mask="url(#routeMask)">
-          <!-- 流光线条 -->
-          <path 
-            :d="routePath"
-            fill="none" 
-            stroke="url(#flowGradient)" 
-            stroke-width="4"
-            stroke-linecap="round"
-            class="animate-flow-light"
-          />
-          <!-- 粒子光点效果 -->
-          <circle class="animate-particle-1" r="4" fill="white" filter="url(#glow)">
-            <animateMotion :path="routePath" dur="3s" repeatCount="indefinite" />
-          </circle>
-          <circle class="animate-particle-2" r="3" fill="rgba(255,255,255,0.7)" filter="url(#glow)">
-            <animateMotion :path="routePath" dur="3s" begin="1s" repeatCount="indefinite" />
-          </circle>
-          <circle class="animate-particle-3" r="2" fill="rgba(255,255,255,0.5)" filter="url(#glow)">
-            <animateMotion :path="routePath" dur="3s" begin="2s" repeatCount="indefinite" />
-          </circle>
-        </g>
-        
-        <!-- 未导航时的虚线预览 -->
-        <path 
-          v-if="!isNavigating"
-          :d="routePath"
-          fill="none" 
-          stroke="#0ea5e9" 
-          stroke-width="3" 
-          stroke-dasharray="8 4"
-          stroke-linecap="round"
-          class="opacity-40 transition-all duration-500"
-        />
-      </svg>
     </div>
 
     <!-- 选点模式提示（精简版，无弹窗） -->
@@ -572,7 +757,7 @@ const expandDrawer = () => {
         </div>
 
         <!-- 方案切换 -->
-        <div class="px-6 py-4">
+        <div v-if="isNavigating" class="px-6 py-4">
           <div class="flex p-1 bg-sky-50 rounded-xl">
             <button 
               @click="planMode = 'normal'"
@@ -611,7 +796,7 @@ const expandDrawer = () => {
         </div>
 
         <!-- 内容区域 -->
-        <div class="flex-1 overflow-y-auto px-6 pb-6">
+        <div v-if="isNavigating" class="flex-1 overflow-y-auto px-6 pb-6">
           <!-- 普通模式：路线列表 -->
           <div v-if="planMode === 'normal'" class="space-y-3">
             <div 
@@ -820,7 +1005,7 @@ const expandDrawer = () => {
         </div>
 
         <!-- 方案切换 -->
-        <div class="mb-5">
+        <div v-if="isNavigating" class="mb-5">
           <div class="flex p-1 bg-sky-50 rounded-xl">
             <button 
               @click="planMode = 'normal'"
@@ -853,7 +1038,7 @@ const expandDrawer = () => {
         </div>
 
         <!-- 内容区 -->
-        <div v-if="drawerState !== 'collapsed'">
+        <div v-if="isNavigating && drawerState !== 'collapsed'">
           <!-- 普通模式 -->
           <div v-if="planMode === 'normal'" class="space-y-3 mb-8">
             <div 

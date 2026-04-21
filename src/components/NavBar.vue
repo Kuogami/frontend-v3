@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Home, MapPin, Route, Bot, Menu, X, ChevronDown, User, Heart, MapPinned, LogOut } from 'lucide-vue-next'
+import { useUser } from '../composables/useUser'
 
 const route = useRoute()
 const router = useRouter()
 const isMenuOpen = ref(false)
-const isLoggedIn = ref(false)
 const isDropdownOpen = ref(false)
+
+const { isLoggedIn, userInfo, userInitial, logout } = useUser()
 
 const navItems = [
   { name: '首页', icon: Home, path: '/' },
@@ -21,6 +23,8 @@ const dropdownItems = [
   { name: '我的收藏', icon: Heart, path: '/favorites' },
   { name: '旅行记录', icon: MapPinned, path: '/history' },
 ]
+
+const avatarSrc = computed(() => userInfo.value?.avatar || '')
 
 // 判断当前路由是否激活
 const isActive = (path: string) => {
@@ -47,7 +51,7 @@ const handleLogin = () => {
 }
 
 const handleLogout = () => {
-  isLoggedIn.value = false
+  logout()
   isDropdownOpen.value = false
   router.push('/')
 }
@@ -56,13 +60,6 @@ const navigateTo = (path: string) => {
   router.push(path)
   isDropdownOpen.value = false
   isMenuOpen.value = false
-}
-
-// 模拟登录状态变化（实际项目中应该从状态管理获取）
-// 这里简单模拟：访问登录页后设为已登录
-const checkLoginStatus = () => {
-  // 模拟已登录状态，方便演示
-  isLoggedIn.value = localStorage.getItem('isLoggedIn') === 'true'
 }
 
 // 监听路由变化关闭下拉菜单
@@ -117,8 +114,19 @@ router.afterEach(() => {
                 @click="toggleDropdown"
                 class="flex items-center gap-2 p-1.5 rounded-xl hover:bg-sky-50 transition-colors"
               >
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-sky-400 to-sky-500 flex items-center justify-center text-white text-sm font-medium shadow-md shadow-sky-200">
-                  旅
+                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-sky-400 to-sky-500 flex items-center justify-center shadow-md shadow-sky-200 overflow-hidden">
+                  <img
+                    v-if="avatarSrc"
+                    :src="avatarSrc"
+                    alt="用户头像"
+                    class="w-full h-full object-cover"
+                  />
+                  <span
+                    v-else
+                    class="text-white text-sm font-medium"
+                  >
+                    {{ userInitial }}
+                  </span>
                 </div>
                 <ChevronDown 
                   class="w-4 h-4 text-[var(--color-carbon-light)] transition-transform duration-200" 
@@ -147,8 +155,8 @@ router.afterEach(() => {
                   class="absolute right-0 mt-2 w-48 py-2 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl shadow-sky-100/50 border border-[var(--color-border-light)]"
                 >
                   <div class="px-4 py-3 border-b border-[var(--color-border-light)]">
-                    <p class="text-sm font-medium text-[var(--color-carbon)]">旅行者</p>
-                    <p class="text-xs text-[var(--color-carbon-light)]">traveler@example.com</p>
+                    <p class="text-sm font-medium text-[var(--color-carbon)]">{{ userInfo?.name || '旅行者' }}</p>
+                    <p class="text-xs text-[var(--color-carbon-light)]">{{ userInfo?.email || 'traveler@example.com' }}</p>
                   </div>
                   <button
                     v-for="item in dropdownItems"

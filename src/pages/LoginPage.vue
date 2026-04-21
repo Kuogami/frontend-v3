@@ -5,7 +5,7 @@ import { Mail, Lock, Eye, EyeOff, ArrowLeft, User } from 'lucide-vue-next'
 import { useUser } from '../composables/useUser'
 
 const router = useRouter()
-const { login } = useUser()
+const { login, register } = useUser()
 
 // 切换登录/注册模式
 const isLoginMode = ref(true)
@@ -49,13 +49,15 @@ const handleSubmit = async () => {
   errorMessage.value = ''
   
   try {
-    // 模拟 API 请求
-    await new Promise(resolve => setTimeout(resolve, 1500))
-    
-    // 登录/注册成功，跳转首页
+    const backendUsername = email.value.trim()
+    if (isLoginMode.value) {
+      await login(backendUsername, password.value)
+    } else {
+      await register(backendUsername, password.value)
+    }
     router.push('/')
   } catch (error) {
-    errorMessage.value = isLoginMode.value ? '登录失败，请检查邮箱和密码' : '注册失败，请稍后重试'
+    errorMessage.value = error instanceof Error ? error.message : '登录失败，请稍后重试'
   } finally {
     isLoading.value = false
   }

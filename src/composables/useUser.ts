@@ -1,81 +1,150 @@
-import { ref, computed } from 'vue'
+import { computed, ref } from 'vue'
+import { apiGet, apiPost } from '../services/api'
 
-// 用户信息接口
+interface LoginPayload {
+  token: string
+  userId: number
+  username: string
+  avatar?: string | null
+}
+
+interface CurrentUserPayload {
+  id: number
+  name: string
+  avatar?: string | null
+  tag?: string | null
+  status?: number | null
+  gender?: number | null
+}
+
 interface UserInfo {
+  id?: number
   name: string
   email: string
   avatar: string
+  tag?: string
+  status?: number | null
+  gender?: number | null
 }
 
-// 全局用户状态（单例模式）
 const isLoggedIn = ref(false)
 const userInfo = ref<UserInfo | null>(null)
 
-// 默认头像 - 使用 Data URL 生成纯色头像
 const defaultAvatar = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4MCIgaGVpZ2h0PSI4MCIgdmlld0JveD0iMCAwIDgwIDgwIj48cmVjdCB3aWR0aD0iODAiIGhlaWdodD0iODAiIGZpbGw9IiMwMEEzRkYiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0id2hpdGUiIGZvbnQtc2l6ZT0iMzIiIGZvbnQtZmFtaWx5PSJzeXN0ZW0tdWksIHNhbnMtc2VyaWYiPuaXhTwvdGV4dD48L3N2Zz4='
 
-// 初始化：从 localStorage 恢复登录状态
-const initUserState = () => {
-  try {
-    const storedIsLoggedIn = localStorage.getItem('isLoggedIn')
-    const storedUserInfo = localStorage.getItem('userInfo')
-    
-    if (storedIsLoggedIn === 'true' && storedUserInfo) {
-      isLoggedIn.value = true
-      userInfo.value = JSON.parse(storedUserInfo)
-    }
-  } catch (error) {
-    // 解析失败时清除存储
-    localStorage.removeItem('isLoggedIn')
-    localStorage.removeItem('userInfo')
+const applyUserState = (nextUser: UserInfo | null, token?: string | null) => {
+  if (token) {
+    localStorage.setItem('token', token)
   }
+
+  if (nextUser) {
+    localStorage.setItem('isLoggedIn', 'true')
+    localStorage.setItem('userInfo', JSON.stringify(nextUser))
+    isLoggedIn.value = true
+    userInfo.value = nextUser
+    return
+  }
+
+  localStorage.removeItem('token')
+  localStorage.removeItem('isLoggedIn')
+  localStorage.removeItem('userInfo')
+  isLoggedIn.value = false
+  userInfo.value = null
 }
 
-// 立即初始化
+const mapLoginUser = (payload: LoginPayload): UserInfo => ({
+  id: payload.userId,
+  name: payload.username || '旅行者',
+  email: payload.username || 'traveler@example.com',
+  avatar: payload.avatar || defaultAvatar,
+})
+
+const mapCurrentUser = (payload: CurrentUserPayload, fallbackEmail?: string): UserInfo => ({
+  id: payload.id,
+  name: payload.name || '旅行者',
+  email: fallbackEmail || payload.name || 'traveler@example.com',
+  avatar: payload.avatar || defaultAvatar,
+  tag: payload.tag || '',
+  status: payload.status ?? null,
+  gender: payload.gender ?? null,
+})
+
+const initUserState = () => {
+  try {
+    const storedToken = localStorage.getItem('token')
+    const storedIsLoggedIn = localStorage.getItem('isLoggedIn')
+    const storedUserInfo = localStorage.getItem('userInfo')
+
+    if (storedToken && storedIsLoggedIn === 'true' && storedUserInfo) {
+      isLoggedIn.value = true
+      userInfo.value = JSON.parse(storedUserInfo) as UserInfo
+      return
+    }
+  } catch {
+    // ignore parse failure and reset below
+  }
+
+  applyUserState(null)
+}
+
 initUserState()
 
 export function useUser() {
-  // 登录
-  const login = (email?: string, name?: string) => {
-    const user: UserInfo = {
-      name: name || '旅行者',
-      email: email || 'traveler@example.com',
-      avatar: defaultAvatar
+  const refreshCurrentUser = async () => {
+    const current = await apiGet<CurrentUserPayload>('/api/me')
+    const nextUser = mapCurrentUser(current, userInfo.value?.email)
+    applyUserState(nextUser, localStorage.getItem('token'))
+    return nextUser
+  }
+
+  const login = async (username: string, password: string) => {
+    const payload = await apiPost<LoginPayload>('/api/login', { username, password })
+
+    let nextUser = mapLoginUser(payload)
+    applyUserState(nextUser, payload.token)
+
+    try {
+      nextUser = await refreshCurrentUser()
+    } catch {
+      applyUserState(nextUser, payload.token)
     }
-    
-    // 存储到 localStorage
-    localStorage.setItem('isLoggedIn', 'true')
-    localStorage.setItem('userInfo', JSON.stringify(user))
-    
-    // 更新响应式状态
-    isLoggedIn.value = true
-    userInfo.value = user
+
+    return nextUser
   }
-  
-  // 登出
+
+  const register = async (username: string, password: string) => {
+    const payload = await apiPost<LoginPayload>('/api/register', { username, password })
+
+    let nextUser = mapLoginUser(payload)
+    applyUserState(nextUser, payload.token)
+
+    try {
+      nextUser = await refreshCurrentUser()
+    } catch {
+      applyUserState(nextUser, payload.token)
+    }
+
+    return nextUser
+  }
+
   const logout = () => {
-    // 清除 localStorage
-    localStorage.removeItem('isLoggedIn')
-    localStorage.removeItem('userInfo')
-    
-    // 更新响应式状态
-    isLoggedIn.value = false
-    userInfo.value = null
+    applyUserState(null)
   }
-  
-  // 计算属性：用户首字
+
   const userInitial = computed(() => {
     if (userInfo.value?.name) {
       return userInfo.value.name.charAt(0)
     }
     return '旅'
   })
-  
+
   return {
     isLoggedIn,
     userInfo,
     userInitial,
     login,
-    logout
+    register,
+    refreshCurrentUser,
+    logout,
   }
 }

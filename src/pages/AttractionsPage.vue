@@ -1,20 +1,55 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { Search, Download, Star, Heart, MapPin, Building2, TreePine, Landmark, Church, BookOpen } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
+import { Search, Download, Star, MapPin, Building2, TreePine, Landmark, Church, BookOpen } from 'lucide-vue-next'
+import { apiDelete, apiGet, apiPost } from '../services/api'
 
-// 模式切换
 type Mode = 'search' | 'import'
-const activeMode = ref<Mode>('search')
+type CategoryValue = 'scenic' | 'park' | 'museum' | 'ancient-town' | 'temple' | 'memorial'
 
-// 搜索模式表单
+type BackendAttraction = {
+  id: number
+  name: string
+  category?: string | null
+  city?: string | null
+  averageRating?: number | null
+  address?: string | null
+  description?: string | null
+  latitude?: number | null
+  longitude?: number | null
+}
+
+type FavoriteItemResponse = {
+  attraction: BackendAttraction
+  addTime?: string
+}
+
+type RatingItemResponse = {
+  attraction: BackendAttraction
+  score: number
+  addTime?: string
+}
+
+type AttractionCard = {
+  id: number
+  name: string
+  category: string
+  rating: number
+  userRating: number
+  isFavorite: boolean
+  city: string
+  showFeedback: boolean
+  address: string
+  description: string
+  latitude: number | null
+  longitude: number | null
+}
+
+const activeMode = ref<Mode>('search')
 const searchCity = ref('')
 const searchKeyword = ref('')
-
-// 导入模式表单
 const importCity = ref('')
-const importCategory = ref('')
+const importCategory = ref<CategoryValue | ''>('')
 
-// 导入类别选项
 const categories = [
   { value: 'scenic', label: '风景名胜', icon: TreePine },
   { value: 'park', label: '公园', icon: TreePine },
@@ -22,99 +57,198 @@ const categories = [
   { value: 'ancient-town', label: '古镇', icon: Landmark },
   { value: 'temple', label: '寺庙', icon: Church },
   { value: 'memorial', label: '纪念馆', icon: BookOpen },
-]
+] as const
 
-// 模拟景点数据
-const attractions = ref([
-  { id: 1, name: '故宫博物院', category: '博物馆', rating: 0, userRating: 0, isFavorite: false, city: '北京', showFeedback: false },
-  { id: 2, name: '西湖风景区', category: '风景名胜', rating: 0, userRating: 0, isFavorite: true, city: '杭州', showFeedback: false },
-  { id: 3, name: '兵马俑', category: '博物馆', rating: 0, userRating: 0, isFavorite: false, city: '西安', showFeedback: false },
-  { id: 4, name: '乌镇', category: '古镇', rating: 0, userRating: 0, isFavorite: false, city: '嘉兴', showFeedback: false },
-  { id: 5, name: '灵隐寺', category: '寺庙', rating: 0, userRating: 0, isFavorite: true, city: '杭州', showFeedback: false },
-  { id: 6, name: '颐和园', category: '公园', rating: 0, userRating: 0, isFavorite: false, city: '北京', showFeedback: false },
-])
+const importCategoryCodeMap: Record<CategoryValue, number> = {
+  scenic: 2,
+  park: 3,
+  museum: 4,
+  'ancient-town': 5,
+  temple: 6,
+  memorial: 7,
+}
 
-// 悬停星级
+const attractions = ref<AttractionCard[]>([])
 const hoverRatings = ref<Record<number, number>>({})
+const favoriteIds = ref<Set<number>>(new Set())
+const ratingMap = ref<Record<number, number>>({})
+const isLoading = ref(false)
 
-// 切换收藏
-const toggleFavorite = (id: number) => {
-  const attraction = attractions.value.find(a => a.id === id)
-  if (attraction) {
-    attraction.isFavorite = !attraction.isFavorite
+const hasToken = computed(() => Boolean(localStorage.getItem('token')))
+
+const normalizeScore = (value?: number | null) => {
+  if (typeof value !== 'number' || Number.isNaN(value)) return 0
+  return Math.max(0, Math.min(5, Number(value.toFixed(1))))
+}
+
+const mapAttraction = (item: BackendAttraction): AttractionCard => ({
+  id: item.id,
+  name: item.name,
+  category: item.category || '景点',
+  rating: normalizeScore(item.averageRating),
+  userRating: ratingMap.value[item.id] || 0,
+  isFavorite: favoriteIds.value.has(item.id),
+  city: item.city || '待定',
+  showFeedback: false,
+  address: item.address || '待定',
+  description: item.description || '暂无简介',
+  latitude: item.latitude ?? null,
+  longitude: item.longitude ?? null,
+})
+
+const refreshAttractionStates = () => {
+  attractions.value = attractions.value.map((item) => ({
+    ...item,
+    userRating: ratingMap.value[item.id] || 0,
+    isFavorite: favoriteIds.value.has(item.id),
+  }))
+}
+
+const loadUserBehaviors = async () => {
+  if (!hasToken.value) {
+    favoriteIds.value = new Set()
+    ratingMap.value = {}
+    refreshAttractionStates()
+    return
+  }
+
+  const [favoritesData, ratingsData] = await Promise.all([
+    apiGet<FavoriteItemResponse[]>('/api/user/favorites'),
+    apiGet<RatingItemResponse[]>('/api/user/ratings'),
+  ])
+
+  favoriteIds.value = new Set(
+    favoritesData
+      .map((item) => item.attraction?.id)
+      .filter((id): id is number => typeof id === 'number'),
+  )
+
+  ratingMap.value = ratingsData.reduce<Record<number, number>>((acc, item) => {
+    if (item.attraction?.id) {
+      acc[item.attraction.id] = item.score
+    }
+    return acc
+  }, {})
+
+  refreshAttractionStates()
+}
+
+const loadAttractions = async (city = '', keyword = '') => {
+  isLoading.value = true
+  try {
+    const data = await apiGet<BackendAttraction[]>('/api/attractions', {
+      city: city || undefined,
+      keyword: keyword || undefined,
+    })
+    attractions.value = data.map(mapAttraction)
+  } finally {
+    isLoading.value = false
   }
 }
 
-// 设置悬停星级
+const toggleFavorite = async (id: number) => {
+  if (!hasToken.value) {
+    window.alert('请先登录后再收藏景点。')
+    return
+  }
+
+  if (favoriteIds.value.has(id)) {
+    await apiDelete(`/api/favorites/${id}`)
+    favoriteIds.value.delete(id)
+  } else {
+    await apiPost('/api/favorites', { attractionId: id })
+    favoriteIds.value.add(id)
+  }
+
+  refreshAttractionStates()
+}
+
 const setHoverRating = (attractionId: number, rating: number) => {
   hoverRatings.value[attractionId] = rating
 }
 
-// 清除悬停星级
 const clearHoverRating = (attractionId: number) => {
   hoverRatings.value[attractionId] = 0
 }
 
-// 提交评分
-const submitRating = (attractionId: number, rating: number) => {
-  const attraction = attractions.value.find(a => a.id === attractionId)
+const submitRating = async (attractionId: number, rating: number) => {
+  if (!hasToken.value) {
+    window.alert('请先登录后再评分。')
+    return
+  }
+
+  await apiPost('/api/ratings', { attractionId, score: rating })
+  ratingMap.value = { ...ratingMap.value, [attractionId]: rating }
+
+  const attraction = attractions.value.find((item) => item.id === attractionId)
   if (attraction) {
     attraction.userRating = rating
     attraction.showFeedback = true
-    // 2秒后隐藏反馈
     setTimeout(() => {
       attraction.showFeedback = false
     }, 2000)
   }
 }
 
-// 获取显示的星级（悬停优先，否则显示用户评分）
-const getDisplayRating = (attraction: typeof attractions.value[0]) => {
+const getDisplayRating = (attraction: AttractionCard) => {
   if (hoverRatings.value[attraction.id] > 0) {
     return hoverRatings.value[attraction.id]
   }
   return attraction.userRating
 }
 
-// 搜索处理
-const handleSearch = () => {
-  console.log('搜索:', searchCity.value, searchKeyword.value)
+const handleSearch = async () => {
+  await loadAttractions(searchCity.value, searchKeyword.value)
 }
 
-// 导入处理
-const handleImport = () => {
-  console.log('导入:', importCity.value, importCategory.value)
+const handleImport = async () => {
+  if (!importCity.value || !importCategory.value) {
+    window.alert('请先选择城市和导入类别。')
+    return
+  }
+
+  await apiGet('/api/map/poi-import', {
+    city: importCity.value,
+    categoryCode: importCategoryCodeMap[importCategory.value],
+    page: 1,
+    pageSize: 20,
+  })
+
+  activeMode.value = 'search'
+  searchCity.value = importCity.value
+  searchKeyword.value = ''
+  await loadAttractions(importCity.value, '')
 }
 
-// 获取类别对应的图标
 const getCategoryIcon = (category: string) => {
   const iconMap: Record<string, any> = {
-    '风景名胜': TreePine,
-    '公园': TreePine,
-    '博物馆': Building2,
-    '古镇': Landmark,
-    '寺庙': Church,
-    '纪念馆': BookOpen,
+    风景名胜: TreePine,
+    公园: TreePine,
+    博物馆: Building2,
+    古镇: Landmark,
+    寺庙: Church,
+    纪念馆: BookOpen,
   }
   return iconMap[category] || MapPin
 }
+
+onMounted(async () => {
+  await loadUserBehaviors()
+  await loadAttractions()
+})
 </script>
 
 <template>
-  <div class="w-full max-w-4xl mx-auto px-4 py-8">
-    <!-- 标题 -->
-    <h1 class="text-2xl font-semibold text-carbon text-center mb-8">景点查询与导入</h1>
-    
-    <!-- Segmented Control -->
-    <div class="flex justify-center mb-8">
-      <div class="inline-flex p-1 bg-sky-50 rounded-full">
+  <div class="mx-auto w-full max-w-4xl px-4 py-8">
+    <h1 class="mb-8 text-center text-2xl font-semibold text-carbon">景点查询与导入</h1>
+
+    <div class="mb-8 flex justify-center">
+      <div class="inline-flex rounded-full bg-sky-50 p-1">
         <button
           @click="activeMode = 'search'"
           :class="[
-            'px-6 py-2.5 rounded-full text-sm font-medium transition-all duration-300',
-            activeMode === 'search'
-              ? 'bg-white text-sky-primary shadow-sm'
-              : 'text-carbon-light hover:text-carbon'
+            'rounded-full px-6 py-2.5 text-sm font-medium transition-all duration-300',
+            activeMode === 'search' ? 'bg-white text-sky-primary shadow-sm' : 'text-carbon-light hover:text-carbon',
           ]"
         >
           <span class="flex items-center gap-2">
@@ -125,10 +259,8 @@ const getCategoryIcon = (category: string) => {
         <button
           @click="activeMode = 'import'"
           :class="[
-            'px-6 py-2.5 rounded-full text-sm font-medium transition-all duration-300',
-            activeMode === 'import'
-              ? 'bg-white text-sky-primary shadow-sm'
-              : 'text-carbon-light hover:text-carbon'
+            'rounded-full px-6 py-2.5 text-sm font-medium transition-all duration-300',
+            activeMode === 'import' ? 'bg-white text-sky-primary shadow-sm' : 'text-carbon-light hover:text-carbon',
           ]"
         >
           <span class="flex items-center gap-2">
@@ -139,55 +271,52 @@ const getCategoryIcon = (category: string) => {
       </div>
     </div>
 
-    <!-- 搜索/导入区域 -->
     <div class="mb-10">
-      <!-- 搜索模式 -->
-      <div v-if="activeMode === 'search'" class="flex items-center gap-3 p-4 bg-sky-50/60 rounded-2xl">
+      <div v-if="activeMode === 'search'" class="flex items-center gap-3 rounded-2xl bg-sky-50/60 p-4">
         <div class="flex-1">
           <input
             v-model="searchCity"
             type="text"
             placeholder="输入城市"
-            class="w-full px-4 py-3 bg-white/80 rounded-xl text-carbon placeholder:text-carbon-light/60 outline-none focus:ring-2 focus:ring-sky-primary/20 transition-all"
+            class="w-full rounded-xl bg-white/80 px-4 py-3 text-carbon outline-none transition-all placeholder:text-carbon-light/60 focus:ring-2 focus:ring-sky-primary/20"
           />
         </div>
         <div class="flex-1">
           <input
             v-model="searchKeyword"
             type="text"
-            placeholder="输入关键词"
-            class="w-full px-4 py-3 bg-white/80 rounded-xl text-carbon placeholder:text-carbon-light/60 outline-none focus:ring-2 focus:ring-sky-primary/20 transition-all"
+            placeholder="输入景点关键词"
+            class="w-full rounded-xl bg-white/80 px-4 py-3 text-carbon outline-none transition-all placeholder:text-carbon-light/60 focus:ring-2 focus:ring-sky-primary/20"
           />
         </div>
         <button
           @click="handleSearch"
-          class="px-8 py-3 bg-sky-primary text-white font-medium rounded-full hover:bg-sky-primary/90 active:scale-[0.98] transition-all shadow-sm shadow-sky-primary/25"
+          class="rounded-full bg-sky-primary px-8 py-3 font-medium text-white shadow-sm shadow-sky-primary/25 transition-all hover:bg-sky-primary/90 active:scale-[0.98]"
         >
           搜索
         </button>
       </div>
 
-      <!-- 导入模式 -->
-      <div v-else class="flex items-center gap-3 p-4 bg-sky-50/60 rounded-2xl">
+      <div v-else class="flex items-center gap-3 rounded-2xl bg-sky-50/60 p-4">
         <div class="flex-1">
           <input
             v-model="importCity"
             type="text"
             placeholder="输入城市"
-            class="w-full px-4 py-3 bg-white/80 rounded-xl text-carbon placeholder:text-carbon-light/60 outline-none focus:ring-2 focus:ring-sky-primary/20 transition-all"
+            class="w-full rounded-xl bg-white/80 px-4 py-3 text-carbon outline-none transition-all placeholder:text-carbon-light/60 focus:ring-2 focus:ring-sky-primary/20"
           />
         </div>
-        <div class="flex-1 relative">
+        <div class="relative flex-1">
           <select
             v-model="importCategory"
-            class="w-full px-4 py-3 bg-white/80 rounded-xl text-carbon outline-none focus:ring-2 focus:ring-sky-primary/20 transition-all appearance-none cursor-pointer"
+            class="w-full cursor-pointer appearance-none rounded-xl bg-white/80 px-4 py-3 text-carbon outline-none transition-all focus:ring-2 focus:ring-sky-primary/20"
           >
             <option value="" disabled>选择导入类别</option>
             <option v-for="cat in categories" :key="cat.value" :value="cat.value">
               {{ cat.label }}
             </option>
           </select>
-          <div class="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none">
+          <div class="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">
             <svg class="w-4 h-4 text-carbon-light" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
             </svg>
@@ -195,35 +324,37 @@ const getCategoryIcon = (category: string) => {
         </div>
         <button
           @click="handleImport"
-          class="px-8 py-3 bg-sky-primary text-white font-medium rounded-full hover:bg-sky-primary/90 active:scale-[0.98] transition-all shadow-sm shadow-sky-primary/25"
+          class="rounded-full bg-sky-primary px-8 py-3 font-medium text-white shadow-sm shadow-sky-primary/25 transition-all hover:bg-sky-primary/90 active:scale-[0.98]"
         >
           导入
         </button>
       </div>
     </div>
 
-    <!-- 结果展示区 -->
     <div class="space-y-4">
-      <h2 class="text-lg font-medium text-carbon mb-4">景点列表</h2>
-      
-      <div class="flex flex-col gap-4">
+      <h2 class="mb-4 text-lg font-medium text-carbon">景点列表</h2>
+
+      <div v-if="isLoading" class="rounded-2xl bg-white/70 p-8 text-center text-carbon-light shadow-[0_2px_12px_rgba(147,177,207,0.12)]">
+        正在加载景点数据...
+      </div>
+
+      <div v-else class="flex flex-col gap-4">
         <div
           v-for="attraction in attractions"
           :key="attraction.id"
-          class="flex items-center justify-between p-5 bg-white rounded-2xl shadow-[0_2px_12px_rgba(147,177,207,0.12)] hover:shadow-[0_4px_20px_rgba(147,177,207,0.18)] transition-all duration-300"
+          class="flex items-center justify-between rounded-2xl bg-white p-5 shadow-[0_2px_12px_rgba(147,177,207,0.12)] transition-all duration-300 hover:shadow-[0_4px_20px_rgba(147,177,207,0.18)]"
         >
-          <!-- 左侧：名称和类别 -->
           <div class="flex items-center gap-4">
-            <div class="w-12 h-12 rounded-xl bg-sky-50 flex items-center justify-center">
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-sky-50">
               <component :is="getCategoryIcon(attraction.category)" class="w-6 h-6 text-sky-primary" />
             </div>
             <div>
               <h3 class="text-base font-medium text-carbon">{{ attraction.name }}</h3>
-              <div class="flex items-center gap-2 mt-1">
-                <span class="px-2.5 py-0.5 text-xs font-medium text-sky-primary bg-sky-50 rounded-full">
+              <div class="mt-1 flex items-center gap-2">
+                <span class="rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-primary">
                   {{ attraction.category }}
                 </span>
-                <span class="text-xs text-carbon-light flex items-center gap-1">
+                <span class="flex items-center gap-1 text-xs text-carbon-light">
                   <MapPin class="w-3 h-3" />
                   {{ attraction.city }}
                 </span>
@@ -231,33 +362,27 @@ const getCategoryIcon = (category: string) => {
             </div>
           </div>
 
-          <!-- 右侧：评分和操作 -->
           <div class="flex items-center gap-4">
-            <!-- 交互式星级评分 -->
             <div class="flex items-center gap-2">
-              <div 
-                class="flex items-center"
-                @mouseleave="clearHoverRating(attraction.id)"
-              >
+              <div class="flex items-center" @mouseleave="clearHoverRating(attraction.id)">
                 <button
                   v-for="i in 5"
                   :key="i"
+                  class="p-0.5 transition-transform duration-150 hover:scale-110 active:scale-95"
                   @mouseenter="setHoverRating(attraction.id, i)"
                   @click="submitRating(attraction.id, i)"
-                  class="p-0.5 transition-transform duration-150 hover:scale-110 active:scale-95"
                 >
                   <Star
                     :class="[
                       'w-5 h-5 transition-all duration-200',
                       i <= getDisplayRating(attraction)
-                        ? 'text-sky-400 fill-sky-400'
-                        : 'text-zinc-300 hover:text-sky-300'
+                        ? 'fill-sky-400 text-sky-400'
+                        : 'text-zinc-300 hover:text-sky-300',
                     ]"
                   />
                 </button>
               </div>
-              
-              <!-- 评分反馈 -->
+
               <Transition
                 enter-active-class="transition-all duration-300"
                 enter-from-class="opacity-0 translate-x-2"
@@ -268,36 +393,31 @@ const getCategoryIcon = (category: string) => {
               >
                 <span
                   v-if="attraction.showFeedback"
-                  class="text-xs text-sky-primary font-medium whitespace-nowrap"
+                  class="whitespace-nowrap text-xs font-medium text-sky-primary"
                 >
-                  感谢您的评分
+                  评分已提交
                 </span>
               </Transition>
             </div>
 
-            <!-- 收藏按钮 -->
             <button
               @click="toggleFavorite(attraction.id)"
               :class="[
-                'p-2.5 rounded-full transition-all duration-300',
+                'rounded-full px-4 py-2 text-sm font-medium transition-all duration-300',
                 attraction.isFavorite
-                  ? 'bg-red-50 text-red-500'
-                  : 'bg-sky-50 text-carbon-light hover:text-red-500 hover:bg-red-50'
+                  ? 'bg-[#00A3FF] text-white shadow-sm shadow-sky-200'
+                  : 'bg-sky-50 text-carbon-light hover:bg-sky-100 hover:text-[var(--color-carbon)]',
               ]"
             >
-              <Heart
-                class="w-5 h-5"
-                :class="attraction.isFavorite ? 'fill-red-500' : ''"
-              />
+              {{ attraction.isFavorite ? '已收藏' : '收藏' }}
             </button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- 空状态 -->
-    <div v-if="attractions.length === 0" class="flex flex-col items-center justify-center py-16">
-      <div class="w-16 h-16 rounded-2xl bg-sky-50 flex items-center justify-center mb-4">
+    <div v-if="attractions.length === 0 && !isLoading" class="flex flex-col items-center justify-center py-16">
+      <div class="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-sky-50">
         <Search class="w-8 h-8 text-sky-primary/50" />
       </div>
       <p class="text-carbon-light">暂无景点数据，请尝试搜索或导入</p>
